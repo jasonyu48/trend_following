@@ -1,0 +1,33 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+
+# Project-local generated data and outputs
+data/
+results/
+*.pdf
+
+# Optional local notes / scratch files
+*.tmp
+*.log
+
+无标题.png
