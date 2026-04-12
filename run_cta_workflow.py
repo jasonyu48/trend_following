@@ -12,6 +12,11 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from market_data import MarketDataSlice, load_symbol_m1_bid_ask, resample_mid_bars
+from plot_top_param_distributions import (
+    build_distributions,
+    plot_distributions,
+    select_param_values_by_1d_neighbor_median,
+)
 from run_backtest import (
     DEFAULT_SYMBOLS,
     build_engine_config,
@@ -71,6 +76,19 @@ def _parse_args() -> argparse.Namespace:
         choices=["annualized_return", "calmar", "sharpe", "total_return"],
         help="metric used to pick the best timeframe for each symbol",
     )
+    p.add_argument(
+        "--param-top-pct",
+        type=float,
+        default=0.2,
+        help="top fraction of param_search_results used when plotting distributions and building the generalized candidate",
+    )
+    p.add_argument(
+        "--param-distribution-chart-type",
+        type=str,
+        default="line",
+        choices=["line", "bar"],
+        help="chart style used for the top-parameter distribution plot",
+    )
     p.add_argument("--commission-bps", type=float, default=0.35)
     p.add_argument("--slippage-bps", type=float, default=0.3)
     p.add_argument("--overnight-long-rate", type=float, default=0.0)
@@ -115,6 +133,12 @@ def _write_records_jsonl(df: pd.DataFrame, path: Path) -> None:
         for record in df.to_dict(orient="records"):
             fh.write(json.dumps(record, default=str))
             fh.write("\n")
+
+
+def _jsonable_value(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _load_m1_cache(args: argparse.Namespace) -> dict[str, pd.DataFrame]:
@@ -197,8 +221,72 @@ def _extract_best_params(result: pd.DataFrame, strategy_name: str) -> tuple[obje
         raise ValueError("Parameter search returned no rows")
     strategy = get_strategy(strategy_name)
     best_row = result.iloc[0]
-    param_values = {name: best_row[name] for name in strategy.param_names}
+    param_values = {name: _jsonable_value(best_row[name]) for name in strategy.param_names}
     return build_strategy_params(strategy_name, param_values), param_values
+
+
+def _param_values_from_selection(
+    strategy_name: str,
+    selected_param_values: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = {name: _jsonable_value(value) for name, value in selected_param_values.items()}
+    params = build_strategy_params(strategy_name, normalized)
+    if is_dataclass(params):
+        return {name: _jsonable_value(value) for name, value in asdict(params).items()}
+    return normalized
+
+
+def _mark_selected_param_rows(
+    param_search: pd.DataFrame,
+    primary_param_values: dict[str, Any],
+    generalized_param_values: dict[str, Any] | None,
+) -> pd.DataFrame:
+    out = param_search.copy()
+    out["is_primary_candidate"] = False
+    if not out.empty:
+        out.loc[out.index[0], "is_primary_candidate"] = True
+    out["matches_generalized_candidate"] = False
+    if generalized_param_values:
+        mask = pd.Series(True, index=out.index, dtype=bool)
+        for name, value in generalized_param_values.items():
+            if name in out.columns:
+                mask &= out[name].eq(value)
+        out["matches_generalized_candidate"] = mask
+    out["matches_primary_param_values"] = False
+    if primary_param_values:
+        mask = pd.Series(True, index=out.index, dtype=bool)
+        for name, value in primary_param_values.items():
+            if name in out.columns:
+                mask &= out[name].eq(value)
+        out["matches_primary_param_values"] = mask
+    return out
+
+
+def _generate_param_distribution_artifacts(
+    *,
+    args: argparse.Namespace,
+    param_search: pd.DataFrame,
+    strategy_name: str,
+) -> dict[str, Any]:
+    param_columns = list(_default_grid(strategy_name).keys())
+    distribution_rows = param_search.to_dict(orient="records")
+    _, summary = build_distributions(
+        distribution_rows,
+        top_pct=args.param_top_pct,
+        params=param_columns,
+    )
+    selection = select_param_values_by_1d_neighbor_median(
+        summary,
+        neighbor_radius=args.neighbor_radius,
+    )
+    plot_distributions(
+        summary,
+        args.out_dir / "top20_param_distributions.png",
+        args.param_distribution_chart_type,
+        selected_values=selection["param_values"],
+    )
+    _write_json(args.out_dir / "top20_param_distributions_summary.json", summary)
+    return summary
 
 
 def _metric_value(stats: dict[str, Any], metric: str) -> float:
@@ -363,6 +451,109 @@ def _evaluate_symbol_timeframes(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_candidate_workflow(
+    *,
+    args: argparse.Namespace,
+    selection_mode: str,
+    fixed_params: object,
+    fixed_param_values: dict[str, Any],
+    resolved_opt_timeframe: str,
+    symbol_specs: dict[str, dict[str, object]],
+    fx_daily: pd.DataFrame,
+    selection_m1_by_symbol: dict[str, pd.DataFrame],
+    final_m1_by_symbol: dict[str, pd.DataFrame],
+    bars_cache: dict[tuple[str, str, str], pd.DataFrame],
+    strategy: Any,
+    config_kwargs: dict[str, Any],
+    portfolio_kwargs: dict[str, Any],
+    out_dir: Path,
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timeframe_rows: list[dict[str, Any]] = []
+    selected_timeframes: dict[str, str] = {}
+    if args.skip_timeframe_selection:
+        selected_timeframes = {symbol: str(resolved_opt_timeframe) for symbol in args.symbols}
+        timeframe_results = pd.DataFrame()
+    else:
+        timeframe_tasks = [
+            {
+                "symbol": symbol,
+                "timeframes": args.timeframe_candidates,
+                "m1": selection_m1_by_symbol[symbol],
+                "symbol_specs": symbol_specs,
+                "fx_daily": fx_daily,
+                "strategy_name": args.strategy,
+                "fixed_param_values": fixed_param_values,
+                "selection_metric": args.selection_metric,
+                "config_kwargs": config_kwargs,
+                "portfolio_kwargs": portfolio_kwargs,
+            }
+            for symbol in args.symbols
+        ]
+        if args.max_workers == 1:
+            timeframe_results_raw = [
+                _evaluate_symbol_timeframes(task)
+                for task in tqdm(timeframe_tasks, desc=f"Selecting timeframes [{selection_mode}]")
+            ]
+        else:
+            timeframe_results_raw = []
+            with ProcessPoolExecutor(max_workers=min(args.max_workers, len(timeframe_tasks))) as executor:
+                futures = [executor.submit(_evaluate_symbol_timeframes, task) for task in timeframe_tasks]
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=f"Selecting timeframes [{selection_mode}]",
+                ):
+                    timeframe_results_raw.append(future.result())
+        for item in sorted(timeframe_results_raw, key=lambda x: args.symbols.index(x["symbol"])):
+            selected_timeframes[item["symbol"]] = item["best_timeframe"]
+            timeframe_rows.extend(item["rows"])
+
+        timeframe_results = pd.DataFrame(timeframe_rows).sort_values(
+            ["symbol", "selection_score", "annualized_return"],
+            ascending=[True, False, False],
+        )
+    if not timeframe_results.empty:
+        timeframe_results["selection_mode"] = selection_mode
+    _write_records_jsonl(timeframe_results, out_dir / "timeframe_search_results.jsonl")
+
+    final_timeframes = {symbol: str(resolved_opt_timeframe) for symbol in args.symbols}
+    final_timeframes.update(selected_timeframes)
+    final_markets = _build_markets_from_cache(
+        final_m1_by_symbol,
+        final_timeframes,
+        bars_cache=bars_cache,
+        phase=f"portfolio_{selection_mode}",
+    )
+    final_config = _make_config(args, symbol_specs, fx_daily, final_timeframes, default_timeframe=resolved_opt_timeframe)
+    final_result = run_portfolio_backtest(
+        market_by_symbol=final_markets,
+        params=fixed_params,
+        strategy=strategy,
+        config=final_config,
+        show_progress=True,
+        progress_desc=f"Portfolio backtest [{selection_mode}]",
+        portfolio_mode=args.portfolio_mode,
+        cash_per_trade=args.cash_per_trade,
+        risk_per_trade=args.risk_per_trade,
+        risk_per_trade_pct=args.risk_per_trade_pct,
+    )
+    save_backtest_outputs(
+        result=final_result,
+        markets=final_markets,
+        out_dir=out_dir,
+        initial_equity=args.initial_equity,
+    )
+    return {
+        "selection_mode": selection_mode,
+        "output_dir": str(out_dir),
+        "resolved_opt_timeframe": resolved_opt_timeframe,
+        "fixed_params": asdict(fixed_params) if is_dataclass(fixed_params) else fixed_param_values,
+        "selected_timeframes": final_timeframes,
+        "portfolio_stats": final_result["portfolio_stats"],
+    }
+
+
 def main() -> int:
     args = _parse_args()
     args.symbols = normalize_symbols(args.symbols)
@@ -397,6 +588,8 @@ def main() -> int:
         )
         resolved_opt_timeframe = _default_timeframe_for_workflow(args)
         args.skip_timeframe_selection = False
+        param_distribution_summary = None
+        generalized_param_values = None
     else:
         param_search, resolved_opt_timeframe = _run_param_search(
             args=args,
@@ -407,6 +600,16 @@ def main() -> int:
             bars_cache=bars_cache,
         )
         fixed_params, fixed_param_values = _extract_best_params(param_search, args.strategy)
+        param_distribution_summary = _generate_param_distribution_artifacts(
+            args=args,
+            param_search=param_search,
+            strategy_name=args.strategy,
+        )
+        generalized_param_values = _param_values_from_selection(
+            args.strategy,
+            param_distribution_summary["selection"]["param_values"],
+        )
+    param_search = _mark_selected_param_rows(param_search, fixed_param_values, generalized_param_values)
     _write_records_jsonl(param_search, args.out_dir / "param_search_results.jsonl")
 
     config_kwargs = {
@@ -425,75 +628,60 @@ def main() -> int:
         "risk_per_trade": args.risk_per_trade,
         "risk_per_trade_pct": args.risk_per_trade_pct,
     }
-    timeframe_rows: list[dict[str, Any]] = []
-    selected_timeframes: dict[str, str] = {}
-    if args.skip_timeframe_selection:
-        selected_timeframes = {symbol: str(resolved_opt_timeframe) for symbol in args.symbols}
-        timeframe_results = pd.DataFrame()
-    else:
-        timeframe_tasks = [
-            {
-                "symbol": symbol,
-                "timeframes": args.timeframe_candidates,
-                "m1": selection_m1_by_symbol[symbol],
-                "symbol_specs": symbol_specs,
-                "fx_daily": fx_daily,
-                "strategy_name": args.strategy,
-                "fixed_param_values": fixed_param_values,
-                "selection_metric": args.selection_metric,
-                "config_kwargs": config_kwargs,
-                "portfolio_kwargs": portfolio_kwargs,
-            }
-            for symbol in args.symbols
-        ]
-        if args.max_workers == 1:
-            timeframe_results_raw = [
-                _evaluate_symbol_timeframes(task)
-                for task in tqdm(timeframe_tasks, desc="Selecting timeframe per symbol")
-            ]
-        else:
-            timeframe_results_raw = []
-            with ProcessPoolExecutor(max_workers=min(args.max_workers, len(timeframe_tasks))) as executor:
-                futures = [executor.submit(_evaluate_symbol_timeframes, task) for task in timeframe_tasks]
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Selecting timeframe per symbol"):
-                    timeframe_results_raw.append(future.result())
-        for item in sorted(timeframe_results_raw, key=lambda x: args.symbols.index(x["symbol"])):
-            selected_timeframes[item["symbol"]] = item["best_timeframe"]
-            timeframe_rows.extend(item["rows"])
-
-        timeframe_results = pd.DataFrame(timeframe_rows).sort_values(
-            ["symbol", "selection_score", "annualized_return"],
-            ascending=[True, False, False],
+    candidate_runs = [
+        _run_candidate_workflow(
+            args=args,
+            selection_mode="best_ranked",
+            fixed_params=fixed_params,
+            fixed_param_values=fixed_param_values,
+            resolved_opt_timeframe=resolved_opt_timeframe,
+            symbol_specs=symbol_specs,
+            fx_daily=fx_daily,
+            selection_m1_by_symbol=selection_m1_by_symbol,
+            final_m1_by_symbol=final_m1_by_symbol,
+            bars_cache=bars_cache,
+            strategy=strategy,
+            config_kwargs=config_kwargs,
+            portfolio_kwargs=portfolio_kwargs,
+            out_dir=args.out_dir,
         )
-    _write_records_jsonl(timeframe_results, args.out_dir / "timeframe_search_results.jsonl")
+    ]
+    if generalized_param_values is not None:
+        if generalized_param_values == fixed_param_values:
+            candidate_runs.append(
+                {
+                    "selection_mode": "generalized_1d_neighbor",
+                    "output_dir": str(args.out_dir),
+                    "resolved_opt_timeframe": resolved_opt_timeframe,
+                    "fixed_params": generalized_param_values,
+                    "selected_timeframes": candidate_runs[0]["selected_timeframes"],
+                    "portfolio_stats": candidate_runs[0]["portfolio_stats"],
+                    "skipped_duplicate_run": True,
+                    "same_as": "best_ranked",
+                }
+            )
+        else:
+            generalized_params = build_strategy_params(args.strategy, generalized_param_values)
+            candidate_runs.append(
+                _run_candidate_workflow(
+                    args=args,
+                    selection_mode="generalized_1d_neighbor",
+                    fixed_params=generalized_params,
+                    fixed_param_values=generalized_param_values,
+                    resolved_opt_timeframe=resolved_opt_timeframe,
+                    symbol_specs=symbol_specs,
+                    fx_daily=fx_daily,
+                    selection_m1_by_symbol=selection_m1_by_symbol,
+                    final_m1_by_symbol=final_m1_by_symbol,
+                    bars_cache=bars_cache,
+                    strategy=strategy,
+                    config_kwargs=config_kwargs,
+                    portfolio_kwargs=portfolio_kwargs,
+                    out_dir=args.out_dir / "generalized_1d_neighbor",
+                )
+            )
 
-    final_timeframes = {symbol: str(resolved_opt_timeframe) for symbol in args.symbols}
-    final_timeframes.update(selected_timeframes)
-    final_markets = _build_markets_from_cache(
-        final_m1_by_symbol,
-        final_timeframes,
-        bars_cache=bars_cache,
-        phase="portfolio",
-    )
-    final_config = _make_config(args, symbol_specs, fx_daily, final_timeframes, default_timeframe=resolved_opt_timeframe)
-    final_result = run_portfolio_backtest(
-        market_by_symbol=final_markets,
-        params=fixed_params,
-        strategy=strategy,
-        config=final_config,
-        show_progress=True,
-        progress_desc="Portfolio backtest",
-        portfolio_mode=args.portfolio_mode,
-        cash_per_trade=args.cash_per_trade,
-        risk_per_trade=args.risk_per_trade,
-        risk_per_trade_pct=args.risk_per_trade_pct,
-    )
-    save_backtest_outputs(
-        result=final_result,
-        markets=final_markets,
-        out_dir=args.out_dir,
-        initial_equity=args.initial_equity,
-    )
+    primary_run = candidate_runs[0]
 
     summary = {
         "symbols": args.symbols,
@@ -511,6 +699,8 @@ def main() -> int:
         "timeframe_candidates": args.timeframe_candidates,
         "neighbor_radius": args.neighbor_radius,
         "selection_metric": args.selection_metric,
+        "param_top_pct": args.param_top_pct,
+        "param_distribution_chart_type": args.param_distribution_chart_type,
         "commission_bps": args.commission_bps,
         "slippage_bps": args.slippage_bps,
         "overnight_long_rate": args.overnight_long_rate,
@@ -519,13 +709,31 @@ def main() -> int:
         "initial_equity": args.initial_equity,
         "initial_margin_ratio": args.initial_margin_ratio,
         "maintenance_margin_ratio": args.maintenance_margin_ratio,
-        "fixed_params": asdict(fixed_params) if is_dataclass(fixed_params) else fixed_param_values,
-        "selected_timeframes": final_timeframes,
+        "fixed_params": primary_run["fixed_params"],
+        "selected_timeframes": primary_run["selected_timeframes"],
         "portfolio_mode": args.portfolio_mode,
         "cash_per_trade": args.cash_per_trade,
         "risk_per_trade": args.risk_per_trade,
         "risk_per_trade_pct": args.risk_per_trade_pct,
-        "portfolio_stats": final_result["portfolio_stats"],
+        "portfolio_stats": primary_run["portfolio_stats"],
+        "primary_selection_mode": primary_run["selection_mode"],
+        "candidate_runs": candidate_runs,
+        "generalized_candidate_params": generalized_param_values,
+        "param_distribution_plot": (
+            str(args.out_dir / "top20_param_distributions.png")
+            if param_distribution_summary is not None
+            else None
+        ),
+        "param_distribution_summary": (
+            str(args.out_dir / "top20_param_distributions_summary.json")
+            if param_distribution_summary is not None
+            else None
+        ),
+        "param_distribution_selection": (
+            param_distribution_summary.get("selection")
+            if param_distribution_summary is not None
+            else None
+        ),
     }
     _write_json(args.out_dir / "workflow_summary.json", summary)
     print(json.dumps(summary, indent=2, default=str))
