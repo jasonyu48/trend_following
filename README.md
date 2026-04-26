@@ -9,6 +9,8 @@ Systematic trend-following research and workflow scripts for multi-symbol backte
 - `run_supertrend_portfolio_dev.py`: timeframe-grid x supertrend-grid portfolio development workflow.
 - `build_trading_session_data.py`: rebuild filtered market data from raw parquet files.
 
+Note: the full grid parameter search in `run_cta_workflow.py` does not work well. Please First use the `heatmap` mode in `run_single_symbol_param_sweep.py` to find parameters, and then use `skip-param-search` in `run_cta_workflow.py`.
+
 ## Data layout
 - Raw M1 data lives in `data/`.
 - The default backtest dataset is `data_trading_sessions/`.
@@ -54,6 +56,8 @@ If you want to reproduce the dataset from scratch, use this order:
 4. Run sanity checks on the filtered output before backtesting
 
 PowerShell example:
+
+Note: replace `C:\Workspace\quantamental\.venv\Scripts\python.exe` with your own environment.
 
 ```powershell
 & "C:\Workspace\quantamental\.venv\Scripts\python.exe" .\download_dukascopy_m1.py `
