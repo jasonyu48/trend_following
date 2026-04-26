@@ -11,7 +11,7 @@ Systematic trend-following research and workflow scripts for multi-symbol backte
 
 Note: the full grid parameter search in `run_cta_workflow.py` does not work well. Please First use the `heatmap` mode in `run_single_symbol_param_sweep.py` to find parameters, and then use `skip-param-search` in `run_cta_workflow.py`.
 
-![Examplar result](results\cta_workflow41_supertrend_4h_30_25_pct\portfolio_pnl.png)
+![Examplar result](./results/cta_workflow41_supertrend_4h_30_25_pct/portfolio_pnl.png)
 
 ## Data layout
 - Raw M1 data lives in `data/`.
