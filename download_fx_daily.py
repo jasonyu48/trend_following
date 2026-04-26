@@ -9,6 +9,8 @@ import yfinance as yf
 
 
 DEFAULT_TICKER_CANDIDATES = {
+    "EURUSD": ["EURUSD=X"],
+    "GBPUSD": ["GBPUSD=X"],
     "USDJPY": ["USDJPY=X"],
     "USDCHF": ["USDCHF=X"],
     "USDCNH": ["USDCNH=X", "USDCNY=X"],
@@ -74,6 +76,18 @@ def _download_first_available(
     return pd.Series(dtype="float64"), None
 
 
+def _add_inverse_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in list(df.columns):
+        if len(col) != 6 or not col.isalpha():
+            continue
+        inverse_col = f"{col[3:]}{col[:3]}"
+        if inverse_col in out.columns:
+            continue
+        out[inverse_col] = 1.0 / out[col]
+    return out
+
+
 def main() -> int:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -104,10 +118,7 @@ def main() -> int:
     if args.fill_missing:
         business_days = pd.date_range(start=args.start, end=pd.Timestamp(args.end) - pd.Timedelta(days=1), freq="B")
         df = df.reindex(business_days).ffill()
-    df["JPYUSD"] = 1.0 / df["USDJPY"]
-    df["CHFUSD"] = 1.0 / df["USDCHF"]
-    df["CNHUSD"] = 1.0 / df["USDCNH"]
-    df["HKDUSD"] = 1.0 / df["USDHKD"]
+    df = _add_inverse_columns(df)
     df.index.name = "date"
 
     csv_path = args.out_dir / f"{args.filename}.csv"

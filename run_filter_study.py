@@ -13,18 +13,18 @@ import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm.auto import tqdm
 
+from data_paths import DEFAULT_DATA_DIR
 from indicators import average_true_range
 from market_data import MarketDataSlice, load_symbol_market_data
 from run_backtest import _load_fx_daily, _load_symbol_specs, build_engine_config
 from search_params import run_portfolio_backtest
+from symbol_universe import DEFAULT_SYMBOLS
 from strategies import STRATEGIES, get_strategy
 from strategies.base import StrategyDefinition
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-DEFAULT_SYMBOLS = ["GBPJPY", "USDJPY", "USDCHF", "XAUUSD", "XAGUSD", "HK50", "JP225", "USDCNH"]
 DEFAULT_INDICATORS = [
     "rsi_14",
     "rsi_20",
@@ -94,7 +94,7 @@ class IndicatorResult:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unified portfolio filter study on top of the existing backtest engine.")
-    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     p.add_argument("--symbol-specs", type=Path, default=Path("symbol_specs.json"))
     p.add_argument("--fx-daily", type=Path, default=Path("data/fx_daily/fx_daily_2012_2025.csv"))
     p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)

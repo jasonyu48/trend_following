@@ -4,7 +4,6 @@ import argparse
 import collections
 import json
 import math
-import statistics
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,6 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 DEFAULT_PARAMS = ["ma_len", "atr_len", "atr_mult", "stop_lookback"]
@@ -41,8 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--neighbor-radius",
         type=int,
-        default=2,
-        help="1D neighborhood radius, in sorted grid steps, used to choose the highlighted value. Default: 2",
+        default=1,
+        help="1D neighborhood radius, in sorted grid steps, used to choose the highlighted value. Default: 1",
     )
     parser.add_argument(
         "--params",
@@ -82,6 +82,19 @@ def _coerce_jsonable(value: Any) -> Any:
     return value
 
 
+def _distribution_sort_key(value: Any) -> tuple[int, Any]:
+    value = _coerce_jsonable(value)
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    text = str(value)
+    try:
+        offset = pd.tseries.frequencies.to_offset(text.strip().lower())
+        delta = pd.Timedelta(offset)
+        return (1, float(delta / pd.Timedelta(minutes=1)))
+    except (ValueError, TypeError):
+        return (2, text)
+
+
 def build_distributions(
     rows: list[dict],
     top_pct: float,
@@ -112,7 +125,7 @@ def build_distributions(
     }
 
     for param in resolved_params:
-        items = sorted(counts[param].items(), key=lambda item: item[0])
+        items = sorted(counts[param].items(), key=lambda item: _distribution_sort_key(item[0]))
         total = sum(count for _, count in items)
         summary["distributions"][param] = [
             {
@@ -125,15 +138,15 @@ def build_distributions(
     return top_rows, summary
 
 
-def select_param_values_by_1d_neighbor_median(
+def select_param_values_by_1d_neighbor_mean(
     summary: dict,
-    neighbor_radius: int = 2,
+    neighbor_radius: int = 1,
 ) -> dict[str, Any]:
     if neighbor_radius < 0:
         raise ValueError("--neighbor-radius must be >= 0")
 
     selection = {
-        "method": "top_slice_1d_neighbor_median_count",
+        "method": "top_slice_1d_neighbor_mean_count",
         "neighbor_radius": int(neighbor_radius),
         "param_values": {},
         "details": {},
@@ -154,7 +167,7 @@ def select_param_values_by_1d_neighbor_median(
                     "value": item["value"],
                     "count": int(item["count"]),
                     "ratio": float(item["ratio"]),
-                    "neighbor_median_count": float(statistics.median(neighborhood_counts)),
+                    "neighbor_mean_count": float(sum(neighborhood_counts) / len(neighborhood_counts)),
                     "neighbor_values": [neigh["value"] for neigh in neighborhood],
                     "neighbor_counts": neighborhood_counts,
                     "grid_index": idx,
@@ -163,8 +176,44 @@ def select_param_values_by_1d_neighbor_median(
         best_item = max(
             scored_items,
             key=lambda item: (
-                float(item["neighbor_median_count"]),
+                float(item["neighbor_mean_count"]),
                 int(item["count"]),
+                -int(item["grid_index"]),
+            ),
+        )
+        best_item = {key: value for key, value in best_item.items() if key != "grid_index"}
+        selection["param_values"][param] = best_item["value"]
+        selection["details"][param] = best_item
+
+    summary["selection"] = selection
+    return selection
+
+
+def select_param_values_by_top_count(summary: dict) -> dict[str, Any]:
+    selection = {
+        "method": "top_slice_top_count",
+        "param_values": {},
+        "details": {},
+    }
+    for param in summary.get("params", list(summary.get("distributions", {}).keys())):
+        items = list(summary["distributions"].get(param, []))
+        if not items:
+            raise ValueError(f"No distribution items found for parameter {param!r}")
+        scored_items: list[dict[str, Any]] = []
+        for idx, item in enumerate(items):
+            scored_items.append(
+                {
+                    "value": item["value"],
+                    "count": int(item["count"]),
+                    "ratio": float(item["ratio"]),
+                    "grid_index": idx,
+                }
+            )
+        best_item = max(
+            scored_items,
+            key=lambda item: (
+                int(item["count"]),
+                float(item["ratio"]),
                 -int(item["grid_index"]),
             ),
         )
@@ -202,16 +251,20 @@ def plot_distributions(
         ys = [item["count"] for item in items]
         selected_value = selection_map.get(param)
         selected_idx = next((idx for idx, value in enumerate(xs) if value == selected_value), None)
+        use_numeric_x = all(isinstance(x, (int, float)) for x in xs)
+        plot_xs = xs if use_numeric_x else list(range(len(xs)))
+        tick_labels = [str(x) for x in xs]
 
         if chart_type == "bar":
             colors = ["#4C78A8"] * len(xs)
             if selected_idx is not None:
                 colors[selected_idx] = "#E45756"
-            ax.bar([str(x) for x in xs], ys, color=colors)
-            ax.tick_params(axis="x", rotation=45)
+            ax.bar(plot_xs, ys, color=colors)
+            ax.set_xticks(plot_xs)
+            ax.set_xticklabels(tick_labels, rotation=45)
             if selected_idx is not None:
                 ax.text(
-                    selected_idx,
+                    plot_xs[selected_idx],
                     ys[selected_idx],
                     f" selected={xs[selected_idx]}",
                     color="#E45756",
@@ -219,13 +272,16 @@ def plot_distributions(
                     va="bottom",
                 )
         else:
-            ax.plot(xs, ys, marker="o", linewidth=2, color="#4C78A8")
+            ax.plot(plot_xs, ys, marker="o", linewidth=2, color="#4C78A8")
+            if not use_numeric_x:
+                ax.set_xticks(plot_xs)
+                ax.set_xticklabels(tick_labels, rotation=45)
             if selected_idx is not None:
-                ax.scatter([xs[selected_idx]], [ys[selected_idx]], color="#E45756", s=70, zorder=3)
-                ax.axvline(xs[selected_idx], linestyle="--", linewidth=1.2, color="#E45756", alpha=0.8)
+                ax.scatter([plot_xs[selected_idx]], [ys[selected_idx]], color="#E45756", s=70, zorder=3)
+                ax.axvline(plot_xs[selected_idx], linestyle="--", linewidth=1.2, color="#E45756", alpha=0.8)
                 ax.annotate(
                     f"selected={xs[selected_idx]}",
-                    xy=(xs[selected_idx], ys[selected_idx]),
+                    xy=(plot_xs[selected_idx], ys[selected_idx]),
                     xytext=(8, 10),
                     textcoords="offset points",
                     color="#E45756",
@@ -253,7 +309,7 @@ def main() -> None:
 
     rows = load_rows(input_path)
     _, summary = build_distributions(rows, args.top_pct, params=args.params)
-    select_param_values_by_1d_neighbor_median(summary, neighbor_radius=args.neighbor_radius)
+    select_param_values_by_top_count(summary)
     plot_distributions(summary, output_path, args.chart_type)
     summary_output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 

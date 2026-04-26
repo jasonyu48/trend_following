@@ -21,6 +21,14 @@ def moving_average(series: pd.Series, length: int, kind: str = "ema") -> pd.Seri
     raise ValueError(f"Unsupported ma kind: {kind}")
 
 
+def trend_ma_centerline(bars: pd.DataFrame, length: int, kind: str = "ema") -> pd.Series:
+    if length <= 0:
+        raise ValueError("length must be positive")
+    if length == 1:
+        return (pd.to_numeric(bars["high"], errors="coerce") + pd.to_numeric(bars["low"], errors="coerce")) / 2.0
+    return moving_average(bars["close"], length=length, kind=kind)
+
+
 def average_true_range(bars: pd.DataFrame, length: int) -> pd.Series:
     tr = true_range(bars)
     return tr.ewm(alpha=1.0 / float(length), adjust=False, min_periods=length).mean()
@@ -87,7 +95,7 @@ def compute_trend_features(
         )
 
     out = pd.DataFrame(index=bars.index)
-    out["ma"] = moving_average(bars["close"], length=ma_len, kind=ma_kind)
+    out["ma"] = trend_ma_centerline(bars, length=ma_len, kind=ma_kind)
     out["atr"] = average_true_range(bars, length=atr_len)
     out["upper"] = out["ma"] + float(atr_mult) * out["atr"]
     out["lower"] = out["ma"] - float(atr_mult) * out["atr"]
@@ -101,8 +109,66 @@ def compute_trend_features(
     return out
 
 
-def bar_performance_stats(equity: pd.Series, bars_per_year: int) -> dict[str, float]:
-    eq = pd.to_numeric(equity, errors="coerce").dropna().astype("float64")
+def bar_performance_stats(
+    equity: pd.Series,
+    bars_per_year: int,
+    timestamps: pd.Series | pd.Index | None = None,
+) -> dict[str, float]:
+    return _bar_performance_stats_with_timestamps(equity, timestamps=timestamps, bars_per_year=bars_per_year)
+
+
+def _max_recovery_time_days(equity: pd.Series, timestamps: pd.Series | pd.Index | None = None) -> float:
+    eq = pd.to_numeric(equity, errors="coerce").astype("float64")
+    if timestamps is None:
+        return np.nan
+    ts = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True))
+    if len(eq) != len(ts):
+        raise ValueError("equity and timestamps must have the same length")
+    series = pd.Series(eq.to_numpy(copy=False), index=ts, dtype="float64").dropna().sort_index()
+    series = series[~series.index.duplicated(keep="last")]
+    if series.empty:
+        return np.nan
+
+    peak_value = float("-inf")
+    peak_time: pd.Timestamp | None = None
+    drawdown_start_time: pd.Timestamp | None = None
+    in_drawdown = False
+    max_recovery = pd.Timedelta(0)
+
+    for ts_value, value in series.items():
+        if value >= peak_value:
+            if in_drawdown and drawdown_start_time is not None:
+                max_recovery = max(max_recovery, ts_value - drawdown_start_time)
+                in_drawdown = False
+                drawdown_start_time = None
+            peak_value = float(value)
+            peak_time = ts_value
+            continue
+        if not in_drawdown and peak_time is not None:
+            in_drawdown = True
+            drawdown_start_time = peak_time
+
+    if in_drawdown and drawdown_start_time is not None:
+        max_recovery = max(max_recovery, series.index[-1] - drawdown_start_time)
+    return float(max_recovery / pd.Timedelta(days=1))
+
+
+def _bar_performance_stats_with_timestamps(
+    equity: pd.Series,
+    timestamps: pd.Series | pd.Index | None,
+    bars_per_year: int,
+) -> dict[str, float]:
+    raw_eq = pd.to_numeric(equity, errors="coerce").astype("float64")
+    if timestamps is not None:
+        ts = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True))
+        if len(raw_eq) != len(ts):
+            raise ValueError("equity and timestamps must have the same length")
+        valid = raw_eq.notna().to_numpy()
+        eq = raw_eq.loc[raw_eq.notna()].astype("float64")
+        stat_timestamps: pd.DatetimeIndex | None = ts[valid]
+    else:
+        eq = raw_eq.dropna().astype("float64")
+        stat_timestamps = None
     if eq.empty:
         return {
             "total_return": np.nan,
@@ -111,6 +177,7 @@ def bar_performance_stats(equity: pd.Series, bars_per_year: int) -> dict[str, fl
             "sharpe": np.nan,
             "max_drawdown": np.nan,
             "calmar": np.nan,
+            "max_recovery_time": np.nan,
         }
     ret = eq.pct_change().fillna(0.0)
     years = max(len(ret) / float(bars_per_year), 1.0 / float(bars_per_year))
@@ -128,6 +195,7 @@ def bar_performance_stats(equity: pd.Series, bars_per_year: int) -> dict[str, fl
     dd = eq / eq.cummax() - 1.0
     max_dd = float(dd.min()) if not dd.empty else np.nan
     calmar = float(ann_return / abs(max_dd)) if np.isfinite(ann_return) and np.isfinite(max_dd) and max_dd < 0 else np.nan
+    max_recovery_time = _max_recovery_time_days(eq, timestamps=stat_timestamps)
     return {
         "total_return": total_return,
         "annualized_return": ann_return,
@@ -135,6 +203,7 @@ def bar_performance_stats(equity: pd.Series, bars_per_year: int) -> dict[str, fl
         "sharpe": sharpe,
         "max_drawdown": max_dd,
         "calmar": calmar,
+        "max_recovery_time": max_recovery_time,
     }
 
 
@@ -156,7 +225,11 @@ def resampled_bar_performance_stats(
     if series.empty:
         return bar_performance_stats(pd.Series(dtype="float64"), bars_per_year=bars_per_year)
     resampled = series.resample(resample_freq).last().ffill().dropna()
-    return bar_performance_stats(resampled, bars_per_year=bars_per_year)
+    return _bar_performance_stats_with_timestamps(
+        resampled,
+        timestamps=resampled.index,
+        bars_per_year=bars_per_year,
+    )
 
 
 def trade_performance_stats(trades: pd.DataFrame, pnl_col: str = "net_pnl") -> dict[str, float]:

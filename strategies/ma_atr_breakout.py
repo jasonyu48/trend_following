@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from indicators import average_true_range, moving_average
+from indicators import average_true_range, trend_ma_centerline
 from strategies.base import StrategyDefinition
 
 
@@ -32,7 +32,7 @@ def compute_features(bars: pd.DataFrame, params: MaAtrBreakoutParams) -> pd.Data
         )
 
     out = pd.DataFrame(index=bars.index)
-    out["ma"] = moving_average(bars["close"], length=params.ma_len, kind=params.ma_kind)
+    out["ma"] = trend_ma_centerline(bars, length=params.ma_len, kind=params.ma_kind)
     out["atr"] = average_true_range(bars, length=params.atr_len)
     out["upper"] = out["ma"] + float(params.atr_mult) * out["atr"]
     out["lower"] = out["ma"] - float(params.atr_mult) * out["atr"]
@@ -91,8 +91,8 @@ def build_signal_schedule(bars: pd.DataFrame, features: pd.DataFrame, params: Ma
 
 def default_grid() -> dict[str, list]:
     return {
-        "ma_len": [1, 3, 5, 7, 10, 14],
-        "atr_len": [10, 20, 30, 40, 50, 60],
+        "ma_len": [1, 5, 10, 14, 20, 30],
+        "atr_len": [7, 10, 20, 30, 40, 50, 60, 80],
         "atr_mult": [1.5, 2.0, 2.5, 3.0, 3.5],
         "stop_lookback": [5, 7, 10, 14, 20, 30, 40, 50, 60],
     }

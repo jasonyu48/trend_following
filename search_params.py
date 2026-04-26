@@ -40,10 +40,10 @@ _GRID_WORKER_RISK_PER_TRADE: float = 0.01
 _GRID_WORKER_RISK_PER_TRADE_PCT: float = 0.01
 USDJPY_RANGE_RETURN_COLUMN = "usd_jpy_range_return_20140201_20140815"
 USDJPY_RANGE_PENALTY_COLUMN = "usd_jpy_range_penalty"
-USDJPY_RANGE_PENALTY_POINTS = 0.15
+USDJPY_RANGE_PENALTY_POINTS = 0.10
 TRADE_COUNT_PENALTY_COLUMN = "trade_count_penalty"
-TRADE_COUNT_BOTTOM_FRACTION = 0.30
-TRADE_COUNT_BOTTOM_PENALTY = 0.08
+TRADE_COUNT_BOTTOM_FRACTION = 0.10
+TRADE_COUNT_BOTTOM_PENALTY = 0.05
 USDJPY_RANGE_START = pd.Timestamp("2014-02-01", tz="UTC")
 USDJPY_RANGE_END = pd.Timestamp("2014-08-15 23:59:59", tz="UTC")
 
@@ -485,6 +485,16 @@ def run_integrated_cash_backtest(
                 if (not schedule.empty and "short_stop" in schedule.columns)
                 else np.full(len(schedule), np.nan, dtype="float64")
             ),
+            "long_exit_band": (
+                schedule["long_exit_band"].to_numpy(dtype="float64", copy=False)
+                if (not schedule.empty and "long_exit_band" in schedule.columns)
+                else np.full(len(schedule), np.nan, dtype="float64")
+            ),
+            "short_exit_band": (
+                schedule["short_exit_band"].to_numpy(dtype="float64", copy=False)
+                if (not schedule.empty and "short_exit_band" in schedule.columns)
+                else np.full(len(schedule), np.nan, dtype="float64")
+            ),
             "n_windows": len(schedule),
             "current_window": 0,
             "minute_idx": 0,
@@ -569,6 +579,7 @@ def run_integrated_cash_backtest(
                 "a_close": float(state["ask_close"][minute_idx]),
                 "had_position_before": state["side"] != "flat",
                 "action_taken": False,
+                "allow_reentry": False,
             }
             eligible_symbols.append(symbol)
 
@@ -576,8 +587,8 @@ def run_integrated_cash_backtest(
         for symbol in eligible_symbols:
             state = states[symbol]
             data = minute_data[symbol]
-            data["exited_on_opposite"] = False
             data["forced_entry_side"] = None
+            reverse_on_opposite_signal = str(getattr(config, "opposite_signal_action", "close_only")) == "close_and_reverse"
             if state["side"] != "flat":
                 overnight_mark_price = _mark_price_from_quotes(state["side"], data["b_open"], data["a_open"])
                 _apply_overnight_financing(state, overnight_mark_price, int(ts_value))
@@ -599,7 +610,30 @@ def run_integrated_cash_backtest(
                 batch_had_margin_liquidation = True
                 continue
             if state["side"] == "long":
-                if strategy.execution_style == "trailing_stop" and state["stop_price"] is not None and data["b_low"] <= float(state["stop_price"]):
+                if (
+                    strategy.execution_style == "trailing_stop"
+                    and np.isfinite(state["long_exit_band"][state["current_window"]])
+                    and data["b_low"] <= float(state["long_exit_band"][state["current_window"]])
+                ):
+                    fill = _stop_fill(
+                        data["b_open"],
+                        data["a_open"],
+                        float(state["long_exit_band"][state["current_window"]]),
+                        "long",
+                        config,
+                    )
+                    _close_open_position(
+                        state=state,
+                        ts_value=int(ts_value),
+                        fill=float(fill),
+                        exit_reason="opposite_signal_band",
+                        event_name="exit_long_opposite_signal_band",
+                    )
+                    data["action_taken"] = True
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "short"
+                elif strategy.execution_style == "trailing_stop" and state["stop_price"] is not None and data["b_low"] <= float(state["stop_price"]):
                     fill = _stop_fill(data["b_open"], data["a_open"], float(state["stop_price"]), "long", config)
                     _close_open_position(
                         state=state,
@@ -609,6 +643,30 @@ def run_integrated_cash_backtest(
                         event_name="exit_long_stop",
                     )
                     data["action_taken"] = True
+                    data["allow_reentry"] = bool(config.allow_flip_same_minute)
+                elif (
+                    strategy.name == "ma_atr_breakout"
+                    and strategy.execution_style == "trailing_stop"
+                    and data["b_low"] <= float(state["short_trigger"][state["current_window"]])
+                ):
+                    fill = _stop_fill(
+                        data["b_open"],
+                        data["a_open"],
+                        float(state["short_trigger"][state["current_window"]]),
+                        "long",
+                        config,
+                    )
+                    _close_open_position(
+                        state=state,
+                        ts_value=int(ts_value),
+                        fill=float(fill),
+                        exit_reason="opposite_atr_band",
+                        event_name="exit_long_opposite_atr_band",
+                    )
+                    data["action_taken"] = True
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "short"
                 elif strategy.execution_style == "opposite_breakout" and data["b_low"] <= float(state["short_trigger"][state["current_window"]]):
                     fill = _entry_fill_from_trigger(
                         data["a_open"],
@@ -622,13 +680,37 @@ def run_integrated_cash_backtest(
                         ts_value=int(ts_value),
                         fill=float(fill),
                         exit_reason="opposite_breakout",
-                        event_name="exit_long_reverse",
+                        event_name="exit_long_reverse" if reverse_on_opposite_signal else "exit_long_opposite_breakout",
                     )
                     data["action_taken"] = True
-                    data["exited_on_opposite"] = True
-                    data["forced_entry_side"] = "short"
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "short"
             elif state["side"] == "short":
-                if strategy.execution_style == "trailing_stop" and state["stop_price"] is not None and data["a_high"] >= float(state["stop_price"]):
+                if (
+                    strategy.execution_style == "trailing_stop"
+                    and np.isfinite(state["short_exit_band"][state["current_window"]])
+                    and data["a_high"] >= float(state["short_exit_band"][state["current_window"]])
+                ):
+                    fill = _stop_fill(
+                        data["b_open"],
+                        data["a_open"],
+                        float(state["short_exit_band"][state["current_window"]]),
+                        "short",
+                        config,
+                    )
+                    _close_open_position(
+                        state=state,
+                        ts_value=int(ts_value),
+                        fill=float(fill),
+                        exit_reason="opposite_signal_band",
+                        event_name="exit_short_opposite_signal_band",
+                    )
+                    data["action_taken"] = True
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "long"
+                elif strategy.execution_style == "trailing_stop" and state["stop_price"] is not None and data["a_high"] >= float(state["stop_price"]):
                     fill = _stop_fill(data["b_open"], data["a_open"], float(state["stop_price"]), "short", config)
                     _close_open_position(
                         state=state,
@@ -638,6 +720,30 @@ def run_integrated_cash_backtest(
                         event_name="exit_short_stop",
                     )
                     data["action_taken"] = True
+                    data["allow_reentry"] = bool(config.allow_flip_same_minute)
+                elif (
+                    strategy.name == "ma_atr_breakout"
+                    and strategy.execution_style == "trailing_stop"
+                    and data["a_high"] >= float(state["long_trigger"][state["current_window"]])
+                ):
+                    fill = _stop_fill(
+                        data["b_open"],
+                        data["a_open"],
+                        float(state["long_trigger"][state["current_window"]]),
+                        "short",
+                        config,
+                    )
+                    _close_open_position(
+                        state=state,
+                        ts_value=int(ts_value),
+                        fill=float(fill),
+                        exit_reason="opposite_atr_band",
+                        event_name="exit_short_opposite_atr_band",
+                    )
+                    data["action_taken"] = True
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "long"
                 elif strategy.execution_style == "opposite_breakout" and data["a_high"] >= float(state["long_trigger"][state["current_window"]]):
                     fill = _entry_fill_from_trigger(
                         data["a_open"],
@@ -651,11 +757,12 @@ def run_integrated_cash_backtest(
                         ts_value=int(ts_value),
                         fill=float(fill),
                         exit_reason="opposite_breakout",
-                        event_name="exit_short_reverse",
+                        event_name="exit_short_reverse" if reverse_on_opposite_signal else "exit_short_opposite_breakout",
                     )
                     data["action_taken"] = True
-                    data["exited_on_opposite"] = True
-                    data["forced_entry_side"] = "long"
+                    data["allow_reentry"] = reverse_on_opposite_signal
+                    if reverse_on_opposite_signal:
+                        data["forced_entry_side"] = "long"
 
         batch_risk_budget = None
         if position_sizing_mode == "fixed_risk_pct":
@@ -666,7 +773,7 @@ def run_integrated_cash_backtest(
             data = minute_data[symbol]
             if batch_had_margin_liquidation:
                 continue
-            if data["action_taken"] and not (config.allow_flip_same_minute or data["exited_on_opposite"]):
+            if data["action_taken"] and not data["allow_reentry"]:
                 continue
             if state["side"] != "flat":
                 continue
@@ -941,6 +1048,7 @@ def run_integrated_cash_backtest(
         symbol_bars_per_year = _bars_per_year(_timeframe_for_symbol(config, symbol))
         stats = bar_performance_stats(
             bar_df["equity"] if not bar_df.empty else pd.Series(dtype="float64"),
+            timestamps=bar_df["bar_end"] if not bar_df.empty else pd.DatetimeIndex([]),
             bars_per_year=symbol_bars_per_year,
         )
         stats["n_trades"] = float(len(trade_df))
@@ -1420,12 +1528,13 @@ def run_cash_portfolio(
     ]
 
 
-def add_neighbor_medians(results: pd.DataFrame, param_columns: list[str], radius: int = 1) -> pd.DataFrame:
+def add_neighbor_means(results: pd.DataFrame, param_columns: list[str], radius: int = 1) -> pd.DataFrame:
     if results.empty:
         return results.copy()
     out = _attach_grid_coordinates(results, param_columns=param_columns)
     ann_neighbors: list[float] = []
     calmar_neighbors: list[float] = []
+    recovery_neighbors: list[float] = []
     coord_cols = [f"{col}_ix" for col in param_columns]
 
     for row_idx, row in enumerate(tqdm(
@@ -1440,11 +1549,13 @@ def add_neighbor_medians(results: pd.DataFrame, param_columns: list[str], radius
         neigh = out.loc[distance <= radius]
         if neigh.empty:
             neigh = out.iloc[[row_idx]]
-        ann_neighbors.append(float(neigh["annualized_return"].median()))
-        calmar_neighbors.append(float(neigh["calmar"].median()))
+        ann_neighbors.append(float(pd.to_numeric(neigh["annualized_return"], errors="coerce").mean()))
+        calmar_neighbors.append(float(pd.to_numeric(neigh["calmar"], errors="coerce").mean()))
+        recovery_neighbors.append(float(pd.to_numeric(neigh["max_recovery_time"], errors="coerce").mean()))
 
-    out["neighbor_median_annualized_return"] = ann_neighbors
-    out["neighbor_median_calmar"] = calmar_neighbors
+    out["neighbor_mean_annualized_return"] = ann_neighbors
+    out["neighbor_mean_calmar"] = calmar_neighbors
+    out["neighbor_mean_max_recovery_time"] = recovery_neighbors
     return out.drop(columns=[f"{col}_ix" for col in param_columns])
 
 
@@ -1452,12 +1563,16 @@ def score_grid_search_results(results: pd.DataFrame, opt_symbol: str | None = No
     if results.empty:
         return results.copy()
     out = results.copy()
-    out["norm_neighbor_median_calmar"] = _normalize_series_minmax(out["neighbor_median_calmar"])
-    out["norm_neighbor_median_annualized_return"] = _normalize_series_minmax(out["neighbor_median_annualized_return"])
+    out["norm_neighbor_mean_calmar"] = _normalize_series_minmax(out["neighbor_mean_calmar"])
+    out["norm_neighbor_mean_annualized_return"] = _normalize_series_minmax(out["neighbor_mean_annualized_return"])
+    out["norm_neighbor_mean_max_recovery_time"] = _normalize_series_minmax(
+        -pd.to_numeric(out["neighbor_mean_max_recovery_time"], errors="coerce")
+    )
     out["norm_annualized_return"] = _normalize_series_minmax(out["annualized_return"])
     out["weighted_score"] = (
-        0.8 * out["norm_neighbor_median_calmar"]
-        + 0.2 * out["norm_neighbor_median_annualized_return"]
+        0.05 * out["norm_neighbor_mean_calmar"]
+        + 0.0 * out["norm_neighbor_mean_annualized_return"]
+        + 0.95 * out["norm_neighbor_mean_max_recovery_time"]
         + 0.0 * out["norm_annualized_return"]
     )
     out[USDJPY_RANGE_PENALTY_COLUMN] = 0.0
@@ -1476,8 +1591,14 @@ def score_grid_search_results(results: pd.DataFrame, opt_symbol: str | None = No
         out["weighted_score"] - out[USDJPY_RANGE_PENALTY_COLUMN] - out[TRADE_COUNT_PENALTY_COLUMN]
     )
     out = out.sort_values(
-        ["weighted_score", "neighbor_median_calmar", "neighbor_median_annualized_return", "annualized_return"],
-        ascending=[False, False, False, False],
+        [
+            "weighted_score",
+            "neighbor_mean_calmar",
+            "neighbor_mean_max_recovery_time",
+            "neighbor_mean_annualized_return",
+            "annualized_return",
+        ],
+        ascending=[False, False, True, False, False],
     ).reset_index(drop=True)
     return out
 
@@ -1544,5 +1665,5 @@ def run_grid_search(
     raw = pd.DataFrame(rows)
     if raw.empty:
         return raw
-    out = add_neighbor_medians(raw, param_columns=list(param_grid.keys()), radius=neighbor_radius)
+    out = add_neighbor_means(raw, param_columns=list(param_grid.keys()), radius=neighbor_radius)
     return score_grid_search_results(out)

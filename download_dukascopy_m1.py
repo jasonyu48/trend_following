@@ -20,6 +20,8 @@ import pandas as pd
 from dukascopy_python import instruments
 from tqdm import tqdm
 
+from symbol_universe import DEFAULT_SYMBOLS
+
 
 def _quiet_custom_logger(debug: bool = False) -> logging.Logger:
     del debug
@@ -38,25 +40,27 @@ def _quiet_third_party_loggers() -> None:
 # User-facing keys -> Dukascopy freeserv instrument codes (see dukascopy_python.instruments)
 SYMBOL_TO_INSTRUMENT: dict[str, str] = {
     "GBPJPY": instruments.INSTRUMENT_FX_CROSSES_GBP_JPY,
+    "GBPUSD": instruments.INSTRUMENT_FX_MAJORS_GBP_USD,
+    "CADJPY": instruments.INSTRUMENT_FX_CROSSES_CAD_JPY,
     "USDJPY": instruments.INSTRUMENT_FX_MAJORS_USD_JPY,
     "USDCHF": instruments.INSTRUMENT_FX_MAJORS_USD_CHF,
     "USDCNH": instruments.INSTRUMENT_FX_CROSSES_USD_CNH,
     "XAUUSD": instruments.INSTRUMENT_FX_METALS_XAU_USD,
     "XAGUSD": instruments.INSTRUMENT_FX_METALS_XAG_USD,
+    "BTCUSD": instruments.INSTRUMENT_VCCY_BTC_USD,
+    "ETHUSD": instruments.INSTRUMENT_VCCY_ETH_USD,
     "HK50": instruments.INSTRUMENT_IDX_ASIA_E_H_KONG,
     "JP225": instruments.INSTRUMENT_IDX_ASIA_E_N225JAP,
+    # Repo-level aliases mapped to Dukascopy index symbols.
+    "US30": instruments.INSTRUMENT_IDX_AMERICA_E_D_J_IND,
+    "SP500": instruments.INSTRUMENT_IDX_AMERICA_E_SANDP_500,
+    "GER40": instruments.INSTRUMENT_IDX_EUROPE_E_DAAX,
+    # Dukascopy stock CFDs use exchange-qualified tickers.
+    "TESLA": instruments.INSTRUMENT_US_TSLA_US_USD,
+    "TSLA": instruments.INSTRUMENT_US_TSLA_US_USD,
+    "NVDA": instruments.INSTRUMENT_US_NVDA_US_USD,
+    "AAPL": instruments.INSTRUMENT_US_AAPL_US_USD,
 }
-
-DEFAULT_SYMBOLS: list[str] = [
-    "GBPJPY",
-    "USDJPY",
-    "USDCHF",
-    "USDCNH",
-    "XAUUSD",
-    "XAGUSD",
-    "HK50",
-    "JP225",
-]
 
 OFFER_SIDES = {"bid": dk.OFFER_SIDE_BID, "ask": dk.OFFER_SIDE_ASK}
 

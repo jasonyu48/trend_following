@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from data_paths import DEFAULT_DATA_DIR
 from run_backtest import build_engine_config, build_strategy_params, _load_fx_daily, _load_symbol_specs
 from run_cta_workflow import _build_markets_from_cache, _load_m1_cache, _slice_m1_window
 from search_params import run_portfolio_backtest
@@ -27,7 +28,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate whether top-N workflow params generalize from validation to test.")
     p.add_argument("--workflow-dir", type=Path, default=Path("results/cta_workflow4"))
     p.add_argument("--top-n", type=int, default=100)
-    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     p.add_argument("--symbol-specs", type=Path, default=Path("symbol_specs.json"))
     p.add_argument("--fx-daily", type=Path, default=Path("data/fx_daily/fx_daily_2012_2025.csv"))
     p.add_argument("--val-weight", type=float, default=0.3)

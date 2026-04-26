@@ -30,6 +30,7 @@ class EngineConfig:
     symbol_specs: dict[str, dict[str, object]] | None = None
     fx_daily: Any = None
     allow_flip_same_minute: bool = False
+    opposite_signal_action: str = "close_only"
 
 
 @dataclass

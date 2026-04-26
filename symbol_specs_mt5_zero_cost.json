@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "version": 1,
+    "account_currency": "USD",
+    "description": "Minimal zero-cost symbol spec for MT5 logic comparison."
+  },
+  "GBPJPY": {
+    "instrument_type": "fx_cfd",
+    "account_currency": "USD",
+    "base_currency": "GBP",
+    "quote_currency": "JPY",
+    "pnl_currency": "JPY",
+    "margin_currency": "USD",
+    "contract_multiplier": 100000.0,
+    "tick_size": 0.001,
+    "min_lot": 0.01,
+    "lot_step": 0.01,
+    "commission_bps": 0.0,
+    "overnight_long_rate": 0.0,
+    "overnight_short_rate": 0.0,
+    "initial_margin_ratio": 0.01,
+    "maintenance_margin_ratio": 0.005
+  }
+}

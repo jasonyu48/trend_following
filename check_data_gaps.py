@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from data_paths import DEFAULT_DATA_DIR
+
 
 YEAR_FILE_RE = re.compile(r"(?P<symbol>[A-Z0-9]+)_M1_(?P<side>bid|ask)_(?P<year>\d{4})\.parquet$")
 
@@ -15,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Scan yearly M1 parquet files for empty files and missing years."
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--end-year", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text output.")

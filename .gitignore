@@ -22,7 +22,7 @@ env/
 Thumbs.db
 
 # Project-local generated data and outputs
-data/
+data*
 results/
 *.pdf
 

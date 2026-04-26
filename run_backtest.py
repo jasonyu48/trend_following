@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from data_paths import DEFAULT_DATA_DIR
 from execution_engine import EngineConfig
 from market_data import load_symbol_market_data
 from search_params import run_grid_search, run_portfolio_backtest
@@ -20,9 +21,7 @@ from strategies import STRATEGIES, get_strategy
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-DEFAULT_SYMBOLS = ["GBPJPY", "USDJPY", "USDCHF", "XAUUSD", "XAGUSD", "HK50", "JP225", "USDCNH"] #, "USDCNH"
-
+from symbol_universe import DEFAULT_SYMBOLS
 
 def normalize_symbols(symbols: list[str]) -> list[str]:
     return [str(symbol).upper() for symbol in symbols]
@@ -87,6 +86,7 @@ def build_engine_config(
     maintenance_margin_ratio: float,
     symbol_specs: dict[str, dict[str, object]],
     fx_daily: pd.DataFrame,
+    opposite_signal_action: str = "close_only",
 ) -> EngineConfig:
     return EngineConfig(
         timeframe=default_timeframe,
@@ -127,12 +127,13 @@ def build_engine_config(
         account_currency="USD",
         symbol_specs=symbol_specs,
         fx_daily=fx_daily,
+        opposite_signal_action=str(opposite_signal_action),
     )
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Trend-following backtest with configurable signal timeframe and M1 bid/ask execution.")
-    p.add_argument("--data-dir", type=Path, default=Path("data"))
+    p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     p.add_argument("--symbol-specs", type=Path, default=Path("symbol_specs.json"))
     p.add_argument("--fx-daily", type=Path, default=Path("data/fx_daily/fx_daily_2012_2025.csv"))
     p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
@@ -164,8 +165,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--neighbor-radius",
         type=int,
-        default=2,
-        help="taxi-cab distance used when computing neighborhood median scores during parameter search",
+        default=1,
+        help="taxi-cab distance used when computing neighborhood mean scores during parameter search",
     )
     p.add_argument("--max-workers", type=int, default=6)
     p.add_argument("--initial-equity", type=float, default=1000000.0)
@@ -268,7 +269,7 @@ def _save_symbol_chart(
         sb["bar_end"] = pd.to_datetime(sb["bar_end"], utc=True)
         sb = sb.set_index("bar_end").sort_index()
 
-    fig, axes = plt.subplots(3, 1, figsize=(70, 10), sharex=True,
+    fig, axes = plt.subplots(3, 1, figsize=(140, 20), sharex=True,
                               gridspec_kw={"height_ratios": [3, 1, 1]})
     ax_p, ax_e, ax_pos = axes
 
